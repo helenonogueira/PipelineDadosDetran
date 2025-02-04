@@ -1,0 +1,146 @@
+services:
+  postgres:
+    image: postgres:13.3
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-d", "postgres", "-U", "root"]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+      start_period: 30s
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=engdados
+      - POSTGRES_HOST=postgres
+      - APP_DB_USER=docker
+      - APP_DB_PASS=docker
+      - APP_DB_NAME=docker
+    volumes:
+      - /tmp/database:/var/lib/posgresql/data
+    ports:
+      - 5432:5432
+    networks:
+      - airflow-network
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minio@1234!
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - airflow-network
+
+  minio_mc:
+    image: minio/mc
+    container_name: minio_mc
+    depends_on:
+      - minio
+    entrypoint: |
+      sh -c "
+      sleep 10 &&
+      mc alias set myminio http://minio:9000 minioadmin minio@1234! &&
+      mc mb myminio/bronze
+      mc mb myminio/silver
+      "
+    networks:
+      - airflow-network
+
+  mysql-airflow:
+    image: mysql:8.0
+    container_name: mysql-airflow
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: airflow
+      MYSQL_USER: airflow_user
+      MYSQL_PASSWORD: airflow_password
+    ports:
+      - "3307:3306"  # Porta externa (host) mapeada para a porta interna do MySQL
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - airflow-network
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/config_airflow/airflow.Dockerfile
+    container_name: airflow
+    environment:
+      AIRFLOW_CORE_EXECUTOR: LocalExecutor
+      AIRFLOW_CORE_SQL_ALCHEMY_COMN: mysql+pymysql://airflow_user:airflow_password@mysql-airflow:3306/airflow
+      AIRFLOW_CORE_LOAD_EXAMPLES: 'False'
+      AIRFLOW_CORE_DAGS_ARE_PAUSED_AT_CREATION: 'True'
+      AIRFLOW_CORE_LOGGING_LEVEL: INFO
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minio@1234!
+    depends_on:
+      - mysql-airflow
+      - minio
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/data:/opt/airflow/data
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/dags:/opt/airflow/config_airflow
+      - ./airflow/config_airflow:/opt/airflow/config_airflow
+    command: ['airflow', 'standalone']
+    networks:
+      - airflow-network
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.0"
+
+  metabase:
+    image: metabase/metabase:v0.47.1
+    container_name: metabase
+    environment:
+      - MB_DB_TYPE=postgres
+      - MB_DB_DBNAME=metabase
+      - MB_DB_PORT=5432
+      - MB_DB_USER=metabase
+      - MB_DB_PASS=metabase_password
+      - MB_DB_HOST=postgres-metabase
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres-metabase
+    volumes:
+      - metabase_data:/metabase-data
+    networks:
+      - airflow-network
+
+  postgres-metabase:
+    image: postgres:15
+    container_name: postgres-metabase
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: metabase_password
+    ports:
+      - "5434:5434"
+    volumes:
+      - postgres_metabase_data:/var/lib/postgresql/data
+    networks:
+      - airflow-network
+
+volumes:
+  postgres_data:
+  minio_data:
+  metabase_data:
+  postgres_metabase_data:
+  mysql_data:
+
+networks:
+  airflow-network:
+    driver: bridge
